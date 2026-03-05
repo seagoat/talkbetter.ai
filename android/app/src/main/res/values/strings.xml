@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TalkBetter</string>
+    <string name="title_activity_main">TalkBetter</string>
+    <string name="package_name">ai.talkbetter.app</string>
+    <string name="custom_url_scheme">ai.talkbetter.app</string>
+</resources>
