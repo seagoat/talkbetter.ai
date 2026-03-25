@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // output: 'export', // Commented out for development with API routes. Uncomment for static export.
+  // Enable static export for Capacitor Android builds when BUILD_TARGET=android
+  ...(process.env.BUILD_TARGET === 'android' && { output: 'export' as const }),
   images: {
     unoptimized: true,
   },

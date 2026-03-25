@@ -10,7 +10,10 @@
     "static": "next build",
     "cap-add-android": "npx cap add android",
     "cap-sync": "npx cap sync",
-    "cap-open-android": "npx cap open android"
+    "cap-open-android": "npx cap open android",
+    "build:android": "cross-env BUILD_TARGET=android next build",
+    "android:build": "npm run build:android && npx cap sync android",
+    "android": "npm run android:build && npx cap open android"
   },
   "dependencies": {
     "@capacitor-community/speech-recognition": "^6.0.1",
@@ -33,6 +36,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "cross-env": "^10.1.0",
     "eslint": "^9",
     "eslint-config-next": "16.1.1",
     "tailwindcss": "^4",

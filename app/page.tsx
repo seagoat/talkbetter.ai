@@ -5,7 +5,7 @@ import { Mic, Play, RotateCcw, ChevronRight, Volume2, AlertCircle, CheckCircle2,
 import { clsx } from 'clsx';
 import { evaluatePronunciation, speakText, getPinyinList, type DetailedEvaluationResult, type TrainingSentence } from '@/lib/speech-utils';
 import { Capacitor } from '@capacitor/core';
-import { SpeechRecognition as CapSpeechRecognition } from '@capacitor-community/speech-recognition';
+import { getSpeechRecognitionService, onSpeechResult, onSpeechError, onSpeechStart, onSpeechEnd, clearAllCallbacks, type SpeechRecognitionService } from '@/lib/native-speech-recognition';
 import { ALL_CONTENT, CATEGORIES, getContentByCategory, type ContentItem } from '@/lib/content';
 import { savePracticeRecord, getPracticeHistory, deletePracticeRecord, clearPracticeHistory, formatRecordDate, formatDuration, type PracticeRecord, type CharacterResult } from '@/lib/history';
 
@@ -122,7 +122,7 @@ export default function Home() {
     setDebugLog(prev => [new Date().toLocaleTimeString() + ': ' + msg, ...prev].slice(0, 5));
   };
 
-  const recognitionRef = useRef<any>(null);
+  const recognitionServiceRef = useRef<SpeechRecognitionService | null>(null);
   const autoStopTimerRef = useRef<NodeJS.Timeout | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastSpeechTimeRef = useRef<number>(0);
@@ -150,100 +150,119 @@ export default function Home() {
     setContentList(selectedCategory ? getContentByCategory(selectedCategory) : ALL_CONTENT);
   }, [selectedCategory]);
 
-  // Initialize recognition
+  // Initialize speech recognition
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      addLog('警告: 浏览器不支持 SpeechRecognition');
-      return;
-    }
 
-    if (!recognitionRef.current) {
-      const recognition = new SpeechRecognition();
-      recognition.lang = 'zh-CN';
-      recognition.continuous = true;
-      recognition.interimResults = true;
+    const initRecognition = async () => {
+      const service = getSpeechRecognitionService();
+      recognitionServiceRef.current = service;
 
-      recognition.onstart = () => { setIsRecording(true); setDebugError(''); addLog('事件: Recognition Started'); };
-      recognition.onend = () => { setIsRecording(false); addLog('事件: Recognition Ended'); };
-      recognition.onerror = (event: any) => {
-        console.error('Speech recognition error', event.error);
-        addLog('!!! 识别报错: ' + event.error);
-        setIsRecording(false);
-        let friendlyMsg = '无法识别声音。';
-        if (event.error === 'not-allowed') friendlyMsg = '请点击允许麦克风访问。';
-        if (event.error === 'network') friendlyMsg = '网络连接不稳定，请重试。';
-        setFeedbackMessage(friendlyMsg);
-        setDebugError(`系统错误代码: ${event.error}`);
-      };
+      const available = await service.isAvailable();
+      if (!available) {
+        addLog('警告: 设备不支持语音识别');
+        return;
+      }
 
-      recognition.onresult = (event: any) => {
-        let finalTranscript = '';
-        let interimTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
-          else interimTranscript += event.results[i][0].transcript;
+      // Request permission on native platforms
+      if (Capacitor.isNativePlatform()) {
+        const granted = await service.requestPermission();
+        if (!granted) {
+          addLog('警告: 未获得麦克风权限');
+          return;
         }
+      }
+    };
 
-        let newSpokenText = spokenTextRef.current;
-        if (finalTranscript) {
-          newSpokenText += finalTranscript;
-          setSpokenText(newSpokenText);
-        }
-        setInterimSpoken(interimTranscript);
+    initRecognition();
 
-        // 只在最终结果时更新评估，避免临时结果导致的跳变
-        // 同时合并最终结果和临时结果用于计算
-        const currentTotalSpoken = newSpokenText + interimTranscript;
+    // Set up event handlers using callbacks
+    const unsubStart = onSpeechStart(() => {
+      setIsRecording(true);
+      setDebugError('');
+      addLog('事件: Recognition Started');
+    });
 
-        // 只有当有最终结果时才更新评估
-        if (finalTranscript) {
-          const matchResults = evaluatePronunciation(currentSentenceRef.current?.text || '', currentTotalSpoken, { enableDetailed: true }) as DetailedEvaluationResult[];
-          setEvaluation(prev => {
-            if (!prev || stepRef.current === 'REREADING_ALL') return matchResults;
-            return matchResults.map((res, idx) => (prev[idx]?.isCorrect) ? prev[idx] : res);
-          });
-        }
+    const unsubEnd = onSpeechEnd(() => {
+      setIsRecording(false);
+      addLog('事件: Recognition Ended');
+    });
 
-        // 计算字数时也转换数字
-        const targetCharCount = (currentSentenceRef.current?.text || '').replace(/[^\u4e00-\u9fa5]/g, '').length;
-        const spokenCharCount = currentTotalSpoken.replace(/[^\u4e00-\u9fa50-9]/g, '').length;
+    const unsubError = onSpeechError((error) => {
+      console.error('Speech recognition error', error);
+      addLog('!!! 识别报错: ' + error);
+      setIsRecording(false);
+      let friendlyMsg = '无法识别声音。';
+      if (error === 'not-allowed' || error === 'Permission denied') friendlyMsg = '请点击允许麦克风访问。';
+      if (error === 'network') friendlyMsg = '网络连接不稳定，请重试。';
+      setFeedbackMessage(friendlyMsg);
+      setDebugError(`系统错误代码: ${error}`);
+    });
 
-        // 更新最后说话时间（用于静音检测）
-        lastSpeechTimeRef.current = Date.now();
+    const unsubResult = onSpeechResult((result) => {
+      const { transcript, isFinal } = result;
+      let newSpokenText = spokenTextRef.current;
 
-        // 清除之前的自动停止定时器
-        if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
+      if (isFinal) {
+        newSpokenText += transcript;
+        setSpokenText(newSpokenText);
+      } else {
+        setInterimSpoken(transcript);
+      }
 
-        // 条件1: 已读完所有字符
-        if (spokenCharCount >= targetCharCount) {
-          autoStopTimerRef.current = setTimeout(() => {
-            addLog('自动检测：用户已完成朗读');
+      // 只在最终结果时更新评估，避免临时结果导致的跳变
+      // 同时合并最终结果和临时结果用于计算
+      const currentTotalSpoken = newSpokenText + (isFinal ? '' : transcript);
+
+      // 只有当有最终结果时才更新评估
+      if (isFinal) {
+        const matchResults = evaluatePronunciation(currentSentenceRef.current?.text || '', currentTotalSpoken, { enableDetailed: true }) as DetailedEvaluationResult[];
+        setEvaluation(prev => {
+          if (!prev || stepRef.current === 'REREADING_ALL') return matchResults;
+          return matchResults.map((res, idx) => (prev[idx]?.isCorrect) ? prev[idx] : res);
+        });
+      }
+
+      // 计算字数时也转换数字
+      const targetCharCount = (currentSentenceRef.current?.text || '').replace(/[^\u4e00-\u9fa5]/g, '').length;
+      const spokenCharCount = currentTotalSpoken.replace(/[^\u4e00-\u9fa50-9]/g, '').length;
+
+      // 更新最后说话时间（用于静音检测）
+      lastSpeechTimeRef.current = Date.now();
+
+      // 清除之前的自动停止定时器
+      if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
+
+      // 条件1: 已读完所有字符
+      if (spokenCharCount >= targetCharCount) {
+        autoStopTimerRef.current = setTimeout(() => {
+          addLog('自动检测：用户已完成朗读');
+          setIsRecording(false);
+        }, 1200);
+      }
+
+      // 条件2: 静音检测 - 2秒内没有新的语音输入，且已朗读超过一半
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (spokenCharCount >= targetCharCount * 0.5) {
+        silenceTimerRef.current = setTimeout(() => {
+          const silenceDuration = Date.now() - lastSpeechTimeRef.current;
+          if (silenceDuration >= 2000) {
+            addLog('自动检测：用户已停止说话（静音超过2秒）');
             setIsRecording(false);
-          }, 1200);
-        }
-
-        // 条件2: 静音检测 - 2秒内没有新的语音输入，且已朗读超过一半
-        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-        if (spokenCharCount >= targetCharCount * 0.5) {
-          silenceTimerRef.current = setTimeout(() => {
-            const silenceDuration = Date.now() - lastSpeechTimeRef.current;
-            if (silenceDuration >= 2000) {
-              addLog('自动检测：用户已停止说话（静音超过2秒）');
-              setIsRecording(false);
-            }
-          }, 2000);
-        }
-      };
-
-      recognitionRef.current = recognition;
-    }
+          }
+        }, 2000);
+      }
+    });
 
     return () => {
+      unsubStart();
+      unsubEnd();
+      unsubError();
+      unsubResult();
+      clearAllCallbacks();
       if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      if (recognitionRef.current) try { recognitionRef.current.abort(); } catch (e) {}
+      recognitionServiceRef.current?.abort();
     };
   }, []);
 
@@ -385,7 +404,11 @@ export default function Home() {
     }
 
     try {
-      recognitionRef.current?.start();
+      await recognitionServiceRef.current?.start({
+        language: 'zh-CN',
+        continuous: true,
+        interimResults: true,
+      });
       setIsRecording(true);
     } catch (e: any) {
       addLog('识别引擎启动报错: ' + e.message);
@@ -399,7 +422,7 @@ export default function Home() {
     setIsRecording(false);
     addLog('正在停止录音...');
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') { mediaRecorderRef.current.stop(); addLog('MediaRecorder 已停止'); }
-    try { recognitionRef.current?.stop(); addLog('Web 引擎已发出 Stop 命令'); } catch (e) {}
+    try { await recognitionServiceRef.current?.stop(); addLog('语音识别已停止'); } catch (e) {}
 
     // 等待识别结果处理完成后，计算最终评估
     setTimeout(() => {

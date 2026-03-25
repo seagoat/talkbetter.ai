@@ -1,5 +1,5 @@
 import { pinyin } from 'pinyin-pro';
-import { Capacitor } from '@capacitor/core';
+import { speak as speakAbstraction, stopSpeaking } from './native-tts';
 
 export interface EvaluationResult {
   char: string;
@@ -661,33 +661,9 @@ export const generatePronunciationComparison = (
   };
 };
 
-// Dynamic calibration: store calibration factor in localStorage
-const CALIBRATION_KEY = 'talkbetter_tts_calibration';
-
-function getCalibrationFactor(): number {
-  if (typeof window === 'undefined') return 1;
-  const saved = localStorage.getItem(CALIBRATION_KEY);
-  if (saved) {
-    const factor = parseFloat(saved);
-    if (!isNaN(factor) && factor > 0.5 && factor < 2) {
-      return factor;
-    }
-  }
-  return 1;
-}
-
-function saveCalibrationFactor(factor: number): void {
-  if (typeof window === 'undefined') return;
-  // Smooth the calibration factor with exponential moving average
-  const current = getCalibrationFactor();
-  const smoothed = current * 0.7 + factor * 0.3;
-  localStorage.setItem(CALIBRATION_KEY, smoothed.toFixed(3));
-  console.log('[TTS] Calibration factor updated:', current.toFixed(3), '->', smoothed.toFixed(3));
-}
-
 /**
- * Enhanced text-to-speech using Edge TTS (high quality neural voice)
- * Falls back to Web Speech API if Edge TTS is not available
+ * Enhanced text-to-speech using Edge TTS (high quality neural voice) or native TTS
+ * Uses the TTS abstraction layer for cross-platform support
  */
 export const speakText = async (
   text: string,
@@ -698,236 +674,20 @@ export const speakText = async (
 ) => {
   console.log('speakText triggered:', text);
 
-  // If running as a Native App (Android/iOS), use Capacitor TTS
-  if (Capacitor.isNativePlatform()) {
-    try {
-      const { TextToSpeech } = await import('@capacitor-community/text-to-speech');
-
-      let charIndex = 0;
-      const charCount = text.length;
-      const msPerChar = 350;
-
-      const timer = setInterval(() => {
-        if (charIndex < charCount) {
-          if (onProgress) onProgress(charIndex);
-          charIndex++;
-        } else {
-          clearInterval(timer);
-        }
-      }, msPerChar);
-
-      await TextToSpeech.speak({
-        text,
-        lang: 'zh-CN',
-        rate: 0.85,
-        pitch: 1.0,
-        volume: 1.0,
-        category: 'ambient',
-      });
-
-      clearInterval(timer);
-      if (onProgress) onProgress(-1);
-      if (onEnd) onEnd();
-      return;
-    } catch (e: any) {
-      console.error('Native TTS failed', e);
-    }
-  }
-
-  // Try Edge TTS API
-  try {
-    console.log('[TTS] Calling Edge TTS API for:', text.substring(0, 20) + '...');
-    const response = await fetch(`/api/tts?text=${encodeURIComponent(text)}&voice=${voice}&rate=${encodeURIComponent(rate)}`);
-    console.log('[TTS] API response status:', response.status);
-
-    if (response.ok) {
-      const audioBlob = await response.blob();
-      console.log('[TTS] Audio blob size:', audioBlob.size, 'type:', audioBlob.type);
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-
-      // Pre-calculate positions of each Chinese character in the original text
-      // This handles duplicate characters correctly
-      const charPositions: number[] = [];
-      for (let i = 0; i < text.length; i++) {
-        if (/[\u4e00-\u9fa5]/.test(text[i])) {
-          charPositions.push(i);
-        }
-      }
-      const charCount = charPositions.length;
-
-      // Progress tracking state
-      let progressInterval: NodeJS.Timeout | null = null;
-      let charIndex = 0;
-      let startTime = 0;
-      let estimatedDuration = 0;
-
-      const startProgressTracking = () => {
-        if (!onProgress || charCount === 0) return;
-
-        startTime = Date.now();
-
-        // Get calibration factor from previous runs
-        const calibrationFactor = getCalibrationFactor();
-
-        // Calculate duration multiplier based on rate
-        let durationMultiplier = 1;
-        if (rate.includes('%')) {
-          const rateValue = parseInt(rate);
-          const speedRatio = Math.max(0.5, (100 + rateValue) / 100);
-          durationMultiplier = 1 / speedRatio;
-        }
-
-        // Count punctuation marks for pause adjustment
-        const punctCount = (text.match(/[，。！？、；：,.!?;:]/g) || []).length;
-        // Each punctuation adds ~200ms pause
-        const punctPause = punctCount * 200;
-
-        // Base: ~250ms per Chinese character at normal speed
-        const baseMsPerChar = 250;
-        const msPerChar = baseMsPerChar * durationMultiplier;
-
-        // Apply calibration factor
-        estimatedDuration = Math.round((charCount * msPerChar + punctPause) * calibrationFactor);
-
-        console.log('[TTS] Tracking:', charCount, 'chars,', punctCount, 'puncts, calibrated duration:', estimatedDuration, 'ms');
-
-        // Highlight first character immediately
-        if (charPositions.length > 0) {
-          onProgress(charPositions[0]);
-          charIndex = 1;
-        }
-
-        progressInterval = setInterval(() => {
-          const elapsed = Date.now() - startTime;
-          const progress = Math.min(elapsed / estimatedDuration, 1);
-
-          // Calculate which Chinese character we should be at
-          const targetCharIdx = Math.floor(progress * charCount);
-
-          // Highlight characters up to target - use pre-calculated positions
-          while (charIndex <= targetCharIdx && charIndex < charPositions.length) {
-            onProgress(charPositions[charIndex]);
-            charIndex++;
-          }
-
-          if (progress >= 1) {
-            if (progressInterval) clearInterval(progressInterval);
-          }
-        }, 50);
-      };
-
-      const stopProgressTracking = () => {
-        if (progressInterval) {
-          clearInterval(progressInterval);
-          progressInterval = null;
-        }
-      };
-
-      // Start progress when audio actually starts playing
-      audio.onplay = () => {
-        console.log('[TTS] Audio started playing');
-        startProgressTracking();
-      };
-
-      audio.oncanplaythrough = () => {
-        audio.play().catch(e => {
-          console.error('[TTS] Play failed:', e);
-        });
-      };
-
-      audio.onended = () => {
-        stopProgressTracking();
-        URL.revokeObjectURL(audioUrl);
-
-        // Dynamic calibration: compare estimated vs actual duration
-        if (startTime > 0 && estimatedDuration > 0) {
-          const actualDuration = Date.now() - startTime;
-          const actualFactor = actualDuration / estimatedDuration;
-
-          // Only calibrate if error is significant (> 10%)
-          if (Math.abs(1 - actualFactor) > 0.1) {
-            saveCalibrationFactor(actualFactor);
-            console.log('[TTS] Calibration: estimated', estimatedDuration, 'ms, actual', actualDuration, 'ms, factor:', actualFactor.toFixed(3));
-          }
-        }
-
-        if (onProgress) onProgress(-1);
-        if (onEnd) onEnd();
-      };
-
-      audio.onerror = () => {
-        stopProgressTracking();
-        URL.revokeObjectURL(audioUrl);
-        console.warn('Edge TTS audio failed, falling back to Web Speech');
-        // Fallback to Web Speech API
-        webSpeechFallback(text, onProgress, onEnd);
-      };
-
-      return;
-    }
-  } catch (e) {
-    console.warn('Edge TTS API failed, falling back to Web Speech:', e);
-  }
-
-  // Fallback to Web Speech API
-  webSpeechFallback(text, onProgress, onEnd);
+  // Use the TTS abstraction layer
+  await speakAbstraction({
+    text,
+    voice,
+    rate,
+    onProgress,
+    onEnd,
+  });
 };
 
 /**
- * Web Speech API fallback
+ * Stop any ongoing TTS
  */
-const webSpeechFallback = (
-  text: string,
-  onProgress?: (charIndex: number) => void,
-  onEnd?: () => void
-) => {
-  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'zh-CN';
-    utterance.rate = 0.8;
-
-    const voices = window.speechSynthesis.getVoices();
-    const zhVoice = voices.find(v => v.lang.includes('zh') && !v.name.includes('Hong Kong') && !v.name.includes('Taiwan'));
-    if (zhVoice) utterance.voice = zhVoice;
-
-    let timer: NodeJS.Timeout | null = null;
-    let currentIndex = 0;
-
-    if (onProgress) {
-      utterance.onboundary = (event) => {
-        if (event.name === 'word') {
-          if (timer) clearInterval(timer);
-          currentIndex = event.charIndex;
-          onProgress(currentIndex);
-
-          timer = setInterval(() => {
-            currentIndex++;
-            if (currentIndex < text.length && /[\u4e00-\u9fa5]/.test(text[currentIndex])) {
-              onProgress(currentIndex);
-            } else {
-              if (timer) clearInterval(timer);
-            }
-          }, 250);
-        }
-      };
-    }
-
-    utterance.onend = () => {
-      if (timer) clearInterval(timer);
-      if (onEnd) onEnd();
-    };
-
-    utterance.onerror = () => {
-      if (timer) clearInterval(timer);
-      if (onEnd) onEnd();
-    };
-
-    window.speechSynthesis.speak(utterance);
-  } else {
-    console.warn('Text-to-speech not supported.');
-    if (onEnd) onEnd();
-  }
+export const stopTTS = async () => {
+  await stopSpeaking();
 };
 
