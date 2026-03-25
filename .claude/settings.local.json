@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsx:*)",
+      "Bash(npx ts-node:*)",
+      "Bash(echo \"import { pinyin } from ''pinyin-pro'';:*)",
+      "Bash(rm debug-pinyin.ts)",
+      "Bash(npm run:*)",
+      "Bash(tasklist)",
+      "Bash(npm install:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(taskkill /F /PID 38876)",
+      "Bash(rm -rf .next/dev/lock)",
+      "Bash(curl -s \"http://localhost:3000/api/tts?text=你好\" -o /tmp/test_tts.mp3)",
+      "Read(//tmp/**)",
+      "Bash(python:*)",
+      "Bash(curl -s \"http://localhost:3000/api/tts?text=%E4%BD%A0%E5%A5%BD%E4%B8%96%E7%95%8C\" -o /tmp/test_api.mp3)",
+      "Bash(curl -s \"http://localhost:3001/api/tts?text=%E4%BD%A0%E5%A5%BD%E4%B8%96%E7%95%8C\" -o /tmp/test_api2.mp3)",
+      "Bash(ffprobe /tmp/test_api2.mp3)",
+      "Bash(npx tsc:*)",
+      "Bash(curl -s http://localhost:3000 -o /dev/null)",
+      "Bash(grep -E 300[0-3].*LISTEN)",
+      "Bash(grep -E 300[0-3])",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
+      "WebSearch",
+      "Bash(curl -s \"http://localhost:3000/api/tts?text=%E4%BD%A0%E5%A5%BD&voice=xiaoxiao&rate=-30%25&timing=true\")",
+      "Bash(rm -f .tts-cache/*.json)",
+      "Bash(ls .tts-cache/*.mp3)"
+    ]
+  }
+}
